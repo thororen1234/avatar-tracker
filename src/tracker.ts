@@ -87,6 +87,7 @@ export async function runTracker(client: Client, channelId: string) {
         });
 
         let targetFound = false;
+        let possibleTargetFound = foundCache[target].length > 0;
 
         for (const result of allResults) {
             if (!foundCache[target].includes(result.url)) {
@@ -98,11 +99,19 @@ export async function runTracker(client: Client, channelId: string) {
 
                 if (targetFound && !isDefinitive) continue;
 
+                if (!isDefinitive && possibleTargetFound) {
+                    foundCache[target].push(result.url);
+                    hasNewFinds = true;
+                    continue;
+                }
+
                 foundCache[target].push(result.url);
                 hasNewFinds = true;
                 const wasDefinitive = await notifyDiscord(client, channelId, target, result, userIds);
                 if (wasDefinitive) {
                     targetFound = true;
+                } else {
+                    possibleTargetFound = true;
                 }
             }
         }
