@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import { searchRipperStore, SearchResult } from './scrapers/ripperStore.js';
 import { searchVrModelsStore } from './scrapers/vrModelsStore.js';
-import { searchVrcPirate } from './scrapers/vrcpirateStore.js';
 import { Client, TextChannel, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 
 const DATA_DIR = process.env.DATA_DIR || process.cwd();
@@ -68,8 +67,7 @@ export async function runTracker(client: Client, channelId: string) {
 
         const ripperResults = await searchRipperStore(target);
         const vrModelsResults = await searchVrModelsStore(target);
-        const vrcPirateResults = await searchVrcPirate(target);
-        const allResults = [...ripperResults, ...vrModelsResults, ...vrcPirateResults];
+        const allResults = [...ripperResults, ...vrModelsResults];
 
         if (!foundCache[target]) {
             foundCache[target] = [];
@@ -100,8 +98,11 @@ async function notifyDiscord(client: Client, channelId: string, target: string, 
         }
 
         const isUnknownCreator = !result.creator || result.creator === 'Unknown' || result.creator === 'VRCPirate Contributor';
-        const embedColor = isUnknownCreator ? '#FFFF00' : '#00FF00';
-        const embedTitle = isUnknownCreator ? 'Possible Avatar Found (Unknown Creator)' : 'Avatar Found!';
+        const isGiftOrFound = result.title.toUpperCase().includes('GIFT') || result.title.toUpperCase().includes('[FOUND]');
+        const isDefinitiveFind = !isUnknownCreator || isGiftOrFound;
+
+        const embedColor = isDefinitiveFind ? '#00FF00' : '#FFFF00';
+        const embedTitle = isDefinitiveFind ? 'Avatar Found!' : 'Possible Avatar Found (Unknown Creator)';
 
         const embed = new EmbedBuilder()
             .setTitle(embedTitle)
@@ -132,7 +133,7 @@ async function notifyDiscord(client: Client, channelId: string, target: string, 
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(button);
 
         const mentions = userIds.map(id => `<@${id}>`).join(' ');
-        const messageContent = isUnknownCreator
+        const messageContent = !isDefinitiveFind
             ? `Found a potential match for **${target}**, but couldn't verify the creator.`
             : `Hey ${mentions}, an avatar you requested was found!`;
 

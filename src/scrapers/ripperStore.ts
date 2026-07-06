@@ -29,6 +29,7 @@ const DL_PATTERNS = [
     /uploadfile\.pl/i, /uploadhaven\.com/i, /uploadnow\.io/i,
     /wdho\.ru/i, /wetransfer\.com/i, /axfc\.net/i, /filemail\.com/i,
     /sendspace\.com/i, /swisstransfer\.com/i, /zippyshare\.day/i,
+    /vrmmodels\.store/i,
 ];
 
 function isDownloadLink(url: string): boolean {
@@ -113,11 +114,11 @@ export async function searchRipperStore(query: string): Promise<SearchResult[]> 
     }
 }
 
-export async function extractPayLinkFromTopic(topicUrl: string): Promise<string | null> {
+export async function extractPayLinkFromTopic(topicUrl: string): Promise<{ payLink: string | null, title: string | null }> {
     let browser;
     try {
         const match = topicUrl.match(/topic\/(\d+)/);
-        if (!match) return null;
+        if (!match) return { payLink: null, title: null };
 
         const tid = match[1];
         const topicApiUrl = `https://forum.ripper.store/api/topic/${tid}`;
@@ -129,26 +130,32 @@ export async function extractPayLinkFromTopic(topicUrl: string): Promise<string 
         const page = await browser.newPage();
 
         const topicData = await getJsonFromPage(page, topicApiUrl);
+        let title = null;
+        if (topicData && topicData.title) {
+            title = topicData.title;
+        }
 
         if (topicData && topicData.posts && topicData.posts.length > 0) {
-            const firstPost = topicData.posts[0];
-            if (firstPost.content) {
-                const $ = cheerio.load(firstPost.content);
-                let payLink: string | null = null;
-                $('a').each((_, el) => {
-                    const href = $(el).attr('href');
-                    if (href) {
-                        const isStoreDomain = href.includes('payhip.com') || href.includes('jinxxy.com') || href.includes('gumroad.com') || href.includes('booth.pm') || href.includes('ko-fi.com') || href.includes('patreon.com');
-                        const isCustomPayhip = /\/b\/[a-zA-Z0-9]{4,8}(?:\?.*)?$/.test(href);
-                        if (isStoreDomain || isCustomPayhip) {
-                            payLink = href;
-                            return false;
+            for (const post of topicData.posts) {
+                if (post.content) {
+                    const $ = cheerio.load(post.content);
+                    let payLink: string | null = null;
+                    $('a').each((_, el) => {
+                        const href = $(el).attr('href');
+                        if (href) {
+                            const isStoreDomain = href.includes('payhip.com') || href.includes('jinxxy.com') || href.includes('gumroad.com') || href.includes('booth.pm') || href.includes('ko-fi.com') || href.includes('patreon.com');
+                            const isCustomPayhip = /\/b\/[a-zA-Z0-9]{4,8}(?:\?.*)?$/.test(href);
+                            if (isStoreDomain || isCustomPayhip) {
+                                payLink = href;
+                                return false;
+                            }
                         }
-                    }
-                });
-                return payLink;
+                    });
+                    if (payLink) return { payLink, title };
+                }
             }
         }
+        return { payLink: null, title };
     } catch (e) {
         console.error(`[RipperStore] Failed to extract pay link from ${topicUrl}:`, e);
     } finally {
@@ -156,5 +163,5 @@ export async function extractPayLinkFromTopic(topicUrl: string): Promise<string 
             await browser.close();
         }
     }
-    return null;
+    return { payLink: null, title: null };
 }
