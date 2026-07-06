@@ -1,0 +1,7 @@
+node_modules
+.env
+targets.json
+found.json
+.git
+.gitignore
+*.log
