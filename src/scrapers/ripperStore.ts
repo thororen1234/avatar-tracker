@@ -1,12 +1,7 @@
-import { addExtra } from 'puppeteer-extra';
-import _puppeteer from 'puppeteer';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import axios from 'axios';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
 import path from 'path';
-
-const puppeteer = addExtra(_puppeteer as any);
-puppeteer.use(StealthPlugin());
 
 const API_URL = 'https://forum.ripper.store/api/search?term={query}&in=posts&matchWords=all&by=&categories=&searchChildren=false&hasTags=&replies=&repliesFilter=atleast&timeFilter=newer&timeRange=&sortBy=relevance&sortDirection=desc&showAs=topics';
 
@@ -38,107 +33,67 @@ function isDownloadLink(url: string): boolean {
     return DL_PATTERNS.some(pattern => pattern.test(url));
 }
 
-async function getJsonFromPage(page: any, url: string): Promise<any> {
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+const COOKIE_PATH = path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), 'ripper_cookies.json');
 
-    await page.waitForFunction(() => {
-        const text = document.body.innerText.trim();
-        return text.startsWith('{') || text.startsWith('[');
-    }, { timeout: 15000 }).catch(() => { });
-
-    const innerText = await page.evaluate(() => document.body.innerText);
-    return JSON.parse(innerText);
-}
-
-const COOKIE_PATH = path.join(process.env.DATA_DIR || process.cwd(), 'ripper_cookies.json');
-
-async function loginToRipperStore(page: any) {
+async function getFlareSolverrResponse(url: string): Promise<any> {
+    const flareUrl = process.env.FLARESOLVERR_URL || 'http://localhost:8191/v1';
+    let cookies: any[] = [];
     if (fs.existsSync(COOKIE_PATH)) {
         try {
-            const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH, 'utf-8'));
-            await page.setCookie(...cookies);
+            const rawCookies = JSON.parse(fs.readFileSync(COOKIE_PATH, 'utf-8'));
+            cookies = rawCookies.map((c: any) => ({
+                name: c.name,
+                value: c.value,
+                domain: c.domain || '.ripper.store',
+                path: c.path || '/'
+            }));
         } catch (e) {
-            console.error('[RipperStore] Failed to parse cookies:', e);
+            console.error('[RipperStore] Failed to read cookies:', e);
         }
     }
 
-    await page.goto('https://forum.ripper.store/', { waitUntil: 'networkidle2', timeout: 30000 });
-    const isLoggedIn = await page.evaluate(() => {
-        return document.querySelector('#user_dropdown') !== null || document.querySelector('[component="header/profilelink"]') !== null;
-    });
-
-    if (isLoggedIn) return;
-
-    const username = process.env.RIPPERSTORE_USERNAME;
-    const password = process.env.RIPPERSTORE_PASSWORD;
-    if (!username || !password) {
-        console.warn('[RipperStore] No credentials provided in .env! Cannot login, links may be hidden.');
-        return;
-    }
-
-    console.log('[RipperStore] Logging in...');
-    await page.goto('https://forum.ripper.store/login', { waitUntil: 'networkidle2', timeout: 60000 });
-
     try {
-        const turnstileIframe = await page.waitForSelector('iframe[src*="cloudflare"]', { timeout: 15000 });
-        if (turnstileIframe) {
-            console.log('[RipperStore] Cloudflare Turnstile detected! Attempting to click...');
-            await new Promise(r => setTimeout(r, 3000));
-            const rect = await turnstileIframe.boundingBox();
-            if (rect) {
-                await page.mouse.move(rect.x + 30, rect.y + rect.height / 2, { steps: 10 });
-                await new Promise(r => setTimeout(r, 500));
-                await page.mouse.down();
-                await new Promise(r => setTimeout(r, 150));
-                await page.mouse.up();
+        const response = await axios.post(flareUrl, {
+            cmd: 'request.get',
+            url: url,
+            maxTimeout: 60000,
+            cookies: cookies
+        }, {
+            headers: { 'Content-Type': 'application/json' }
+        });
 
-                await new Promise(r => setTimeout(r, 1000));
-                await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2, { steps: 10 });
-                await new Promise(r => setTimeout(r, 500));
-                await page.mouse.down();
-                await new Promise(r => setTimeout(r, 150));
-                await page.mouse.up();
+        if (response.data && response.data.solution) {
+            if (response.data.solution.cookies && response.data.solution.cookies.length > 0) {
+                fs.writeFileSync(COOKIE_PATH, JSON.stringify(response.data.solution.cookies, null, 2));
             }
+
+            const html = response.data.solution.response;
+            const $ = cheerio.load(html);
+            const bodyText = $('body').text().trim();
+
+            if (bodyText.startsWith('{') || bodyText.startsWith('[')) {
+                return JSON.parse(bodyText);
+            }
+            if (html.trim().startsWith('{') || html.trim().startsWith('[')) {
+                return JSON.parse(html.trim());
+            }
+
+            console.error(`[RipperStore] Expected JSON from ${url}, got HTML instead.`);
+            return null;
         }
-    } catch (e) { }
-
-    try {
-        await page.waitForSelector('#username', { timeout: 60000 });
-        await page.type('#username', username);
-        await page.type('#password', password);
-
-        await Promise.all([
-            page.click('#login'),
-            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })
-        ]);
-
-        const newCookies = await page.cookies();
-        fs.writeFileSync(COOKIE_PATH, JSON.stringify(newCookies, null, 2));
-        console.log('[RipperStore] Logged in successfully and saved cookies.');
-    } catch (e) {
-        console.error('[RipperStore] Login failed:', e);
-        const errPath = path.join(process.env.DATA_DIR || process.cwd(), 'ripper_login_error.png');
-        await page.screenshot({ path: errPath });
-        console.error(`[RipperStore] Saved error screenshot to ${errPath}`);
+    } catch (e: any) {
+        console.log(flareUrl);
+        console.error(`[RipperStore] FlareSolverr request failed for ${url}:`, e.message);
     }
+    return null;
 }
 
 export async function searchRipperStore(query: string): Promise<SearchResult[]> {
-    let browser;
     try {
-        browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-
-        const page = await browser.newPage();
-
-        await loginToRipperStore(page);
-
         const url = API_URL.replace('{query}', encodeURIComponent(query));
         console.log(`[RipperStore] Searching for: ${query}`);
 
-        const data = await getJsonFromPage(page, url);
+        const data = await getFlareSolverrResponse(url);
         if (!data || !data.posts) {
             return [];
         }
@@ -151,7 +106,7 @@ export async function searchRipperStore(query: string): Promise<SearchResult[]> 
 
                 try {
                     const topicApiUrl = `https://forum.ripper.store/api/topic/${post.topic.tid}`;
-                    const topicData = await getJsonFromPage(page, topicApiUrl);
+                    const topicData = await getFlareSolverrResponse(topicApiUrl);
 
                     if (topicData && topicData.posts) {
                         for (const tPost of topicData.posts) {
@@ -184,15 +139,10 @@ export async function searchRipperStore(query: string): Promise<SearchResult[]> 
     } catch (error) {
         console.error(`[RipperStore] Error searching for ${query}:`, error);
         return [];
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
     }
 }
 
 export async function extractPayLinkFromTopic(topicUrl: string): Promise<{ payLink: string | null, title: string | null }> {
-    let browser;
     try {
         const match = topicUrl.match(/topic\/(\d+)/);
         if (!match) return { payLink: null, title: null };
@@ -200,15 +150,7 @@ export async function extractPayLinkFromTopic(topicUrl: string): Promise<{ payLi
         const tid = match[1];
         const topicApiUrl = `https://forum.ripper.store/api/topic/${tid}`;
 
-        browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-        const page = await browser.newPage();
-
-        await loginToRipperStore(page);
-
-        const topicData = await getJsonFromPage(page, topicApiUrl);
+        const topicData = await getFlareSolverrResponse(topicApiUrl);
         let title = null;
         if (topicData && topicData.title) {
             title = topicData.title;
@@ -237,10 +179,6 @@ export async function extractPayLinkFromTopic(topicUrl: string): Promise<{ payLi
         return { payLink: null, title };
     } catch (e) {
         console.error(`[RipperStore] Failed to extract pay link from ${topicUrl}:`, e);
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
     }
     return { payLink: null, title: null };
 }

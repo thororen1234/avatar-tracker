@@ -4,7 +4,7 @@ import { searchRipperStore, SearchResult } from './scrapers/ripperStore.js';
 import { searchVrModelsStore } from './scrapers/vrModelsStore.js';
 import { Client, TextChannel, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 
-const DATA_DIR = process.env.DATA_DIR || process.cwd();
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const TARGETS_FILE = path.join(DATA_DIR, 'targets.json');
 const FOUND_FILE = path.join(DATA_DIR, 'found.json');
 
@@ -73,12 +73,44 @@ export async function runTracker(client: Client, channelId: string) {
             foundCache[target] = [];
         }
 
+        allResults.sort((a, b) => {
+            const aHasLinks = (a.downloadLinks && a.downloadLinks.length > 0) ? 1 : 0;
+            const bHasLinks = (b.downloadLinks && b.downloadLinks.length > 0) ? 1 : 0;
+            if (aHasLinks > bHasLinks) return -1;
+            if (aHasLinks < bHasLinks) return 1;
+
+            const aGift = a.title.toUpperCase().includes('GIFT') || a.title.toUpperCase().includes('[FOUND]');
+            const bGift = b.title.toUpperCase().includes('GIFT') || b.title.toUpperCase().includes('[FOUND]');
+            if (aGift && !bGift) return -1;
+            if (!aGift && bGift) return 1;
+            return 0;
+        });
+
+        let targetFound = false;
+
         for (const result of allResults) {
             if (!foundCache[target].includes(result.url)) {
+                const isGiftOrFound = result.title.toUpperCase().includes('GIFT') || result.title.toUpperCase().includes('[FOUND]');
+                const isUnknownCreator = !result.creator || result.creator === 'Unknown';
+
+                const hasDownloadLinks = result.downloadLinks && result.downloadLinks.length > 0;
+                const isDefinitive = (!isUnknownCreator || isGiftOrFound) && hasDownloadLinks;
+
+                if (targetFound && !isDefinitive) continue;
+
                 foundCache[target].push(result.url);
                 hasNewFinds = true;
-                await notifyDiscord(client, channelId, target, result, userIds);
+                const wasDefinitive = await notifyDiscord(client, channelId, target, result, userIds);
+                if (wasDefinitive) {
+                    targetFound = true;
+                }
             }
+        }
+
+        if (targetFound) {
+            console.log(`[Tracker] Target ${target} found definitively. Removing from tracker.`);
+            delete targetsMap[target];
+            fs.writeFileSync(TARGETS_FILE, JSON.stringify(targetsMap, null, 2));
         }
     }
 
@@ -89,20 +121,21 @@ export async function runTracker(client: Client, channelId: string) {
     console.log('[Tracker] Run completed.');
 }
 
-async function notifyDiscord(client: Client, channelId: string, target: string, result: SearchResult, userIds: string[]) {
+async function notifyDiscord(client: Client, channelId: string, target: string, result: SearchResult, userIds: string[]): Promise<boolean> {
     try {
         const channel = await client.channels.fetch(channelId) as TextChannel;
         if (!channel || !channel.isTextBased()) {
             console.error('[Tracker] Invalid discord channel configured.');
-            return;
+            return false;
         }
 
-        const isUnknownCreator = !result.creator || result.creator === 'Unknown' || result.creator === 'VRCPirate Contributor';
+        const isUnknownCreator = !result.creator || result.creator === 'Unknown';
         const isGiftOrFound = result.title.toUpperCase().includes('GIFT') || result.title.toUpperCase().includes('[FOUND]');
-        const isDefinitiveFind = !isUnknownCreator || isGiftOrFound;
+        const hasDownloadLinks = result.downloadLinks && result.downloadLinks.length > 0;
+        const isDefinitiveFind = (!isUnknownCreator || isGiftOrFound) && hasDownloadLinks;
 
         const embedColor = isDefinitiveFind ? '#00FF00' : '#FFFF00';
-        const embedTitle = isDefinitiveFind ? 'Avatar Found!' : 'Possible Avatar Found (Unknown Creator)';
+        const embedTitle = isDefinitiveFind ? 'Avatar Found!' : 'Possible Avatar Found';
 
         const embed = new EmbedBuilder()
             .setTitle(embedTitle)
@@ -113,7 +146,7 @@ async function notifyDiscord(client: Client, channelId: string, target: string, 
                 { name: 'Source', value: result.source }
             );
 
-        if (result.creator) {
+        if (result.creator && !isGiftOrFound) {
             embed.addFields({ name: 'Creator', value: result.creator });
         }
 
@@ -143,7 +176,9 @@ async function notifyDiscord(client: Client, channelId: string, target: string, 
             components: [row]
         });
         console.log(`[Tracker] Notified discord about ${result.url}`);
+        return isDefinitiveFind;
     } catch (error) {
         console.error(`[Tracker] Error notifying discord:`, error);
+        return false;
     }
 }

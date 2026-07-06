@@ -16,7 +16,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
         if (userTargets.length === 0) {
             await interaction.reply({ content: 'You are currently not tracking any avatars.', ephemeral: true });
         } else {
-            const list = userTargets.map((t, i) => `${i + 1}. ${t}`).join('\n');
+            const list = userTargets.map((t, i) => `${i + 1}. <${t}>`).join('\n');
             await interaction.reply(`You are currently tracking:\n${list}`);
         }
     }

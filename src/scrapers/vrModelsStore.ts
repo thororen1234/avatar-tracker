@@ -1,15 +1,10 @@
-import { addExtra } from 'puppeteer-extra';
-import _puppeteer, { Browser, Page } from 'puppeteer';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import axios from 'axios';
 import { SearchResult } from './ripperStore.js';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
 import path from 'path';
 
-const puppeteer = addExtra(_puppeteer as any);
-puppeteer.use(StealthPlugin());
-
-const COOKIES_PATH = path.join(process.cwd(), 'vrmodels_cookies.json');
+const COOKIES_PATH = path.join(process.env.DATA_DIR || path.join(process.cwd(), 'data'), 'vrmodels_cookies.json');
 
 const DL_PATTERNS = [
     /mega\.nz/i, /mega\.io/i, /mediafire/i, /drive\.google/i, /gofile\.io/i,
@@ -45,26 +40,61 @@ export function extractCreator(text: string): string | undefined {
     return undefined;
 }
 
-async function loadCookies(page: Page) {
+function getCookies(): any[] {
     if (fs.existsSync(COOKIES_PATH)) {
-        const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
-        if (cookies && cookies.length) {
-            await page.browserContext().setCookie(...cookies);
+        try {
+            const rawCookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+            return rawCookies.map((c: any) => ({
+                name: c.name,
+                value: c.value,
+                domain: c.domain || '.vrmodels.store',
+                path: c.path || '/'
+            }));
+        } catch (e) {
+            console.error('[VRModels] Failed to read cookies:', e);
         }
+    }
+    return [];
+}
+
+function saveCookies(cookies: any[]) {
+    if (cookies && cookies.length > 0) {
+        fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
     }
 }
 
-async function saveCookies(page: Page) {
-    const cookies = await page.browserContext().cookies();
-    fs.writeFileSync(COOKIES_PATH, JSON.stringify(cookies, null, 2));
+async function getFlareSolverrResponse(url: string, isPost: boolean = false, postData: string = ''): Promise<{ html: string, isLoggedOut: boolean } | null> {
+    const flareUrl = process.env.FLARESOLVERR_URL || 'http://localhost:8191/v1';
+
+    try {
+        const response = await axios.post(flareUrl, {
+            cmd: isPost ? 'request.post' : 'request.get',
+            url: url,
+            postData: isPost ? postData : undefined,
+            maxTimeout: 60000,
+            cookies: getCookies()
+        }, {
+            headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (response.data && response.data.solution) {
+            saveCookies(response.data.solution.cookies);
+            const html = response.data.solution.response;
+            const isLoggedOut = html.includes('name="login_name"');
+            return { html, isLoggedOut };
+        }
+    } catch (e: any) {
+        console.error(`[VRModels] FlareSolverr request failed for ${url}:`, e.message);
+    }
+    return null;
 }
 
-async function loginIfNeeded(page: Page) {
-    await page.goto('https://vrmodels.store/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+async function loginIfNeeded() {
+    const response = await getFlareSolverrResponse('https://vrmodels.store/');
+    if (!response) return;
 
-    const content = await page.content();
-    if (content.includes('name="login_name"')) {
-        console.log('[VRModels] Not logged in, attempting login...');
+    if (response.isLoggedOut) {
+        console.log('[VRModels] Not logged in, attempting login via FlareSolverr...');
         const user = process.env.VRMODELS_USERNAME;
         const pass = process.env.VRMODELS_PASSWORD;
         if (!user || !pass) {
@@ -72,16 +102,14 @@ async function loginIfNeeded(page: Page) {
             return;
         }
 
-        await page.type('input[name="login_name"]', user);
-        await page.type('input[name="login_password"]', pass);
+        const postData = `login_name=${encodeURIComponent(user)}&login_password=${encodeURIComponent(pass)}&login=submit`;
+        const loginResponse = await getFlareSolverrResponse('https://vrmodels.store/', true, postData);
 
-        await Promise.all([
-            page.waitForNavigation({ waitUntil: 'domcontentloaded' }),
-            page.click('button[type="submit"], input[type="submit"]')
-        ]).catch(() => console.log('Wait for navigation timed out after login click.'));
-
-        await saveCookies(page);
-        console.log('[VRModels] Login submitted and cookies saved.');
+        if (loginResponse && !loginResponse.isLoggedOut) {
+            console.log('[VRModels] Login submitted and cookies saved.');
+        } else {
+            console.log('[VRModels] Login might have failed. Checking if successful...');
+        }
     } else {
         console.log('[VRModels] Already logged in via cookies.');
     }
@@ -90,24 +118,13 @@ async function loginIfNeeded(page: Page) {
 export async function searchVrModelsStore(query: string): Promise<SearchResult[]> {
     const searchUrl = `https://vrmodels.store/?do=search&subaction=search&story=${encodeURIComponent(query)}`;
 
-    let browser: Browser | null = null;
     try {
-        browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
+        await loginIfNeeded();
 
-        const page = await browser.newPage();
+        const response = await getFlareSolverrResponse(searchUrl);
+        if (!response) return [];
 
-        await loadCookies(page);
-        await loginIfNeeded(page);
-
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        await new Promise(r => setTimeout(r, 3000));
-
-        const content = await page.content();
-        const $ = cheerio.load(content);
-
+        const $ = cheerio.load(response.html);
         const results: SearchResult[] = [];
 
         const linksToVisit: string[] = [];
@@ -127,35 +144,36 @@ export async function searchVrModelsStore(query: string): Promise<SearchResult[]
         for (const url of linksToVisit) {
             let downloadLinks: string[] = [];
             let creator: string | undefined = undefined;
+
             try {
-                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                const pageContent = await page.content();
-                const $page = cheerio.load(pageContent);
+                const pageResponse = await getFlareSolverrResponse(url);
+                if (pageResponse) {
+                    const $page = cheerio.load(pageResponse.html);
 
-                $page('a').each((_, el) => {
-                    const href = $page(el).attr('href');
-                    if (href && isDownloadLink(href) && !downloadLinks.includes(href)) {
-                        downloadLinks.push(href);
-                    }
-                });
-
-                let descriptionText = '';
-                $page('script[type="application/ld+json"]').each((i, el) => {
-                    try {
-                        const data = JSON.parse($page(el).html() || '{}');
-                        if (data['@graph']) {
-                            const article = data['@graph'].find((g: any) => g['@type'] === 'NewsArticle');
-                            if (article && article.description) {
-                                descriptionText += ' ' + article.description;
-                            }
+                    $page('a').each((_, el) => {
+                        const href = $page(el).attr('href');
+                        if (href && isDownloadLink(href) && !downloadLinks.includes(href)) {
+                            downloadLinks.push(href);
                         }
-                    } catch (e) { }
-                });
-                if (!descriptionText) {
-                    descriptionText = $page('meta[name="description"]').attr('content') || '';
-                }
-                creator = extractCreator(descriptionText);
+                    });
 
+                    let descriptionText = '';
+                    $page('script[type="application/ld+json"]').each((i, el) => {
+                        try {
+                            const data = JSON.parse($page(el).html() || '{}');
+                            if (data['@graph']) {
+                                const article = data['@graph'].find((g: any) => g['@type'] === 'NewsArticle');
+                                if (article && article.description) {
+                                    descriptionText += ' ' + article.description;
+                                }
+                            }
+                        } catch (e) { }
+                    });
+                    if (!descriptionText) {
+                        descriptionText = $page('meta[name="description"]').attr('content') || '';
+                    }
+                    creator = extractCreator(descriptionText);
+                }
             } catch (e) {
                 console.error(`[VRModels] Failed to visit ${url}:`, e);
             }
@@ -173,25 +191,12 @@ export async function searchVrModelsStore(query: string): Promise<SearchResult[]
     } catch (error) {
         console.error(`Error searching vrModelsStore for ${query}:`, error);
         return [];
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
     }
 }
 
 export async function getRecentVrModels(daysBack: number = 1): Promise<SearchResult[]> {
-    let browser: Browser | null = null;
     try {
-        browser = await puppeteer.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-
-        const page = await browser.newPage();
-
-        await loadCookies(page);
-        await loginIfNeeded(page);
+        await loginIfNeeded();
 
         const results: SearchResult[] = [];
         const linksToVisit: string[] = [];
@@ -205,11 +210,11 @@ export async function getRecentVrModels(daysBack: number = 1): Promise<SearchRes
 
         while (keepGoing) {
             const url = `https://vrmodels.store/avatars/page/${currentPage}/`;
-            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await new Promise(r => setTimeout(r, 2000));
 
-            const content = await page.content();
-            const $ = cheerio.load(content);
+            const response = await getFlareSolverrResponse(url);
+            if (!response) break;
+
+            const $ = cheerio.load(response.html);
             const shots = $('.shot');
 
             if (shots.length === 0) break;
@@ -250,36 +255,36 @@ export async function getRecentVrModels(daysBack: number = 1): Promise<SearchRes
             let creator: string | undefined = undefined;
 
             try {
-                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-                const pageContent = await page.content();
-                const $page = cheerio.load(pageContent);
+                const pageResponse = await getFlareSolverrResponse(url);
+                if (pageResponse) {
+                    const $page = cheerio.load(pageResponse.html);
 
-                $page('a').each((_, el) => {
-                    const href = $page(el).attr('href');
-                    if (href && isDownloadLink(href) && !downloadLinks.includes(href)) {
-                        downloadLinks.push(href);
-                    }
-                });
-
-                let descriptionText = '';
-                $page('script[type="application/ld+json"]').each((i, el) => {
-                    try {
-                        const data = JSON.parse($page(el).html() || '{}');
-                        if (data['@graph']) {
-                            const article = data['@graph'].find((g: any) => g['@type'] === 'NewsArticle');
-                            if (article && article.description) {
-                                descriptionText += ' ' + article.description;
-                            }
+                    $page('a').each((_, el) => {
+                        const href = $page(el).attr('href');
+                        if (href && isDownloadLink(href) && !downloadLinks.includes(href)) {
+                            downloadLinks.push(href);
                         }
-                    } catch (e) { }
-                });
+                    });
 
-                if (!descriptionText) {
-                    descriptionText = $page('meta[name="description"]').attr('content') || '';
+                    let descriptionText = '';
+                    $page('script[type="application/ld+json"]').each((i, el) => {
+                        try {
+                            const data = JSON.parse($page(el).html() || '{}');
+                            if (data['@graph']) {
+                                const article = data['@graph'].find((g: any) => g['@type'] === 'NewsArticle');
+                                if (article && article.description) {
+                                    descriptionText += ' ' + article.description;
+                                }
+                            }
+                        } catch (e) { }
+                    });
+
+                    if (!descriptionText) {
+                        descriptionText = $page('meta[name="description"]').attr('content') || '';
+                    }
+
+                    creator = extractCreator(descriptionText);
                 }
-
-                creator = extractCreator(descriptionText);
-
             } catch (e) {
                 console.error(`[VRModels] Failed to visit ${url}:`, e);
             }
@@ -297,9 +302,5 @@ export async function getRecentVrModels(daysBack: number = 1): Promise<SearchRes
     } catch (error) {
         console.error(`Error fetching recent vrModelsStore avatars:`, error);
         return [];
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
     }
 }
