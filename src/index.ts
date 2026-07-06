@@ -30,7 +30,7 @@ client.once('ready', async () => {
     try {
         console.log('[Discord] Started refreshing application (/) commands.');
         const rest = new REST({ version: '10' }).setToken(token);
-        
+
         if (client.user) {
             await rest.put(
                 Routes.applicationCommands(client.user.id),

@@ -5,8 +5,9 @@ import { searchVrModelsStore } from './scrapers/vrModelsStore.js';
 import { searchVrcPirate } from './scrapers/vrcpirateStore.js';
 import { Client, TextChannel, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 
-const TARGETS_FILE = path.join(process.cwd(), 'targets.json');
-const FOUND_FILE = path.join(process.cwd(), 'found.json');
+const DATA_DIR = process.env.DATA_DIR || process.cwd();
+const TARGETS_FILE = path.join(DATA_DIR, 'targets.json');
+const FOUND_FILE = path.join(DATA_DIR, 'found.json');
 
 export function getTargets(): Record<string, string[]> {
     try {
@@ -131,7 +132,7 @@ async function notifyDiscord(client: Client, channelId: string, target: string, 
         const row = new ActionRowBuilder<ButtonBuilder>().addComponents(button);
 
         const mentions = userIds.map(id => `<@${id}>`).join(' ');
-        const messageContent = isUnknownCreator 
+        const messageContent = isUnknownCreator
             ? `Found a potential match for **${target}**, but couldn't verify the creator.`
             : `Hey ${mentions}, an avatar you requested was found!`;
 
