@@ -1,5 +1,10 @@
-import axios from 'axios';
+import { addExtra } from 'puppeteer-extra';
+import _puppeteer from 'puppeteer';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import * as cheerio from 'cheerio';
+
+const puppeteer = addExtra(_puppeteer as any);
+puppeteer.use(StealthPlugin());
 
 const API_URL = 'https://forum.ripper.store/api/search?term={query}&in=posts&matchWords=all&by=&categories=&searchChildren=false&hasTags=&replies=&repliesFilter=atleast&timeFilter=newer&timeRange=&sortBy=relevance&sortDirection=desc&showAs=topics';
 
@@ -30,17 +35,32 @@ function isDownloadLink(url: string): boolean {
     return DL_PATTERNS.some(pattern => pattern.test(url));
 }
 
+async function getJsonFromPage(page: any, url: string): Promise<any> {
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+
+    await page.waitForFunction(() => {
+        const text = document.body.innerText.trim();
+        return text.startsWith('{') || text.startsWith('[');
+    }, { timeout: 15000 }).catch(() => { });
+
+    const innerText = await page.evaluate(() => document.body.innerText);
+    return JSON.parse(innerText);
+}
+
 export async function searchRipperStore(query: string): Promise<SearchResult[]> {
+    let browser;
     try {
-        const url = API_URL.replace('{query}', encodeURIComponent(query));
-        const response = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout: 10000
+        browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
 
-        const data = response.data;
+        const page = await browser.newPage();
+
+        const url = API_URL.replace('{query}', encodeURIComponent(query));
+        console.log(`[RipperStore] Searching for: ${query}`);
+
+        const data = await getJsonFromPage(page, url);
         if (!data || !data.posts) {
             return [];
         }
@@ -49,19 +69,14 @@ export async function searchRipperStore(query: string): Promise<SearchResult[]> 
         for (const post of data.posts) {
             if (post.topic && post.topic.title) {
                 const topicUrl = `https://forum.ripper.store/topic/${post.topic.slug}`;
-
                 let downloadLinks: string[] = [];
+
                 try {
                     const topicApiUrl = `https://forum.ripper.store/api/topic/${post.topic.tid}`;
-                    const topicResp = await axios.get(topicApiUrl, {
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-                        },
-                        timeout: 10000
-                    });
+                    const topicData = await getJsonFromPage(page, topicApiUrl);
 
-                    if (topicResp.data && topicResp.data.posts) {
-                        for (const tPost of topicResp.data.posts) {
+                    if (topicData && topicData.posts) {
+                        for (const tPost of topicData.posts) {
                             if (tPost.content) {
                                 const $ = cheerio.load(tPost.content);
                                 $('a').each((_, el) => {
@@ -74,41 +89,49 @@ export async function searchRipperStore(query: string): Promise<SearchResult[]> 
                         }
                     }
                 } catch (e) {
-                    console.error(`Failed to fetch topic ${topicUrl} for links:`, e);
+                    console.error(`[RipperStore] Failed to fetch topic ${topicUrl} for links:`, e);
                 }
 
                 results.push({
                     title: post.topic.title,
                     url: topicUrl,
                     source: 'Ripper.Store',
-                    downloadLinks
+                    downloadLinks,
+                    creator: post.user?.username || 'Unknown'
                 });
             }
         }
 
         return results;
     } catch (error) {
-        console.error(`Error searching RipperStore for ${query}:`, error);
+        console.error(`[RipperStore] Error searching for ${query}:`, error);
         return [];
+    } finally {
+        if (browser) {
+            await browser.close();
+        }
     }
 }
 
 export async function extractPayLinkFromTopic(topicUrl: string): Promise<string | null> {
+    let browser;
     try {
         const match = topicUrl.match(/topic\/(\d+)/);
         if (!match) return null;
 
         const tid = match[1];
         const topicApiUrl = `https://forum.ripper.store/api/topic/${tid}`;
-        const topicResp = await axios.get(topicApiUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            },
-            timeout: 10000
-        });
 
-        if (topicResp.data && topicResp.data.posts && topicResp.data.posts.length > 0) {
-            const firstPost = topicResp.data.posts[0];
+        browser = await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+        const page = await browser.newPage();
+
+        const topicData = await getJsonFromPage(page, topicApiUrl);
+
+        if (topicData && topicData.posts && topicData.posts.length > 0) {
+            const firstPost = topicData.posts[0];
             if (firstPost.content) {
                 const $ = cheerio.load(firstPost.content);
                 let payLink: string | null = null;
@@ -123,7 +146,11 @@ export async function extractPayLinkFromTopic(topicUrl: string): Promise<string 
             }
         }
     } catch (e) {
-        console.error(`Failed to extract pay link from ${topicUrl}:`, e);
+        console.error(`[RipperStore] Failed to extract pay link from ${topicUrl}:`, e);
+    } finally {
+        if (browser) {
+            await browser.close();
+        }
     }
     return null;
 }
