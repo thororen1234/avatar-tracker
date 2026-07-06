@@ -137,9 +137,13 @@ export async function extractPayLinkFromTopic(topicUrl: string): Promise<string 
                 let payLink: string | null = null;
                 $('a').each((_, el) => {
                     const href = $(el).attr('href');
-                    if (href && (href.includes('payhip.com') || href.includes('jinxxy.com') || href.includes('gumroad.com') || href.includes('booth.pm') || href.includes('ko-fi.com') || href.includes('patreon.com'))) {
-                        payLink = href;
-                        return false;
+                    if (href) {
+                        const isStoreDomain = href.includes('payhip.com') || href.includes('jinxxy.com') || href.includes('gumroad.com') || href.includes('booth.pm') || href.includes('ko-fi.com') || href.includes('patreon.com');
+                        const isCustomPayhip = /\/b\/[a-zA-Z0-9]{4,8}(?:\?.*)?$/.test(href);
+                        if (isStoreDomain || isCustomPayhip) {
+                            payLink = href;
+                            return false;
+                        }
                     }
                 });
                 return payLink;
