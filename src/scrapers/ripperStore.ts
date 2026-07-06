@@ -2,6 +2,8 @@ import { addExtra } from 'puppeteer-extra';
 import _puppeteer from 'puppeteer';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import * as cheerio from 'cheerio';
+import fs from 'fs';
+import path from 'path';
 
 const puppeteer = addExtra(_puppeteer as any);
 puppeteer.use(StealthPlugin());
@@ -48,6 +50,79 @@ async function getJsonFromPage(page: any, url: string): Promise<any> {
     return JSON.parse(innerText);
 }
 
+const COOKIE_PATH = path.join(process.env.DATA_DIR || process.cwd(), 'ripper_cookies.json');
+
+async function loginToRipperStore(page: any) {
+    if (fs.existsSync(COOKIE_PATH)) {
+        try {
+            const cookies = JSON.parse(fs.readFileSync(COOKIE_PATH, 'utf-8'));
+            await page.setCookie(...cookies);
+        } catch (e) {
+            console.error('[RipperStore] Failed to parse cookies:', e);
+        }
+    }
+
+    await page.goto('https://forum.ripper.store/', { waitUntil: 'networkidle2', timeout: 30000 });
+    const isLoggedIn = await page.evaluate(() => {
+        return document.querySelector('#user_dropdown') !== null || document.querySelector('[component="header/profilelink"]') !== null;
+    });
+
+    if (isLoggedIn) return;
+
+    const username = process.env.RIPPERSTORE_USERNAME;
+    const password = process.env.RIPPERSTORE_PASSWORD;
+    if (!username || !password) {
+        console.warn('[RipperStore] No credentials provided in .env! Cannot login, links may be hidden.');
+        return;
+    }
+
+    console.log('[RipperStore] Logging in...');
+    await page.goto('https://forum.ripper.store/login', { waitUntil: 'networkidle2', timeout: 60000 });
+
+    try {
+        const turnstileIframe = await page.waitForSelector('iframe[src*="cloudflare"]', { timeout: 15000 });
+        if (turnstileIframe) {
+            console.log('[RipperStore] Cloudflare Turnstile detected! Attempting to click...');
+            await new Promise(r => setTimeout(r, 3000));
+            const rect = await turnstileIframe.boundingBox();
+            if (rect) {
+                await page.mouse.move(rect.x + 30, rect.y + rect.height / 2, { steps: 10 });
+                await new Promise(r => setTimeout(r, 500));
+                await page.mouse.down();
+                await new Promise(r => setTimeout(r, 150));
+                await page.mouse.up();
+
+                await new Promise(r => setTimeout(r, 1000));
+                await page.mouse.move(rect.x + rect.width / 2, rect.y + rect.height / 2, { steps: 10 });
+                await new Promise(r => setTimeout(r, 500));
+                await page.mouse.down();
+                await new Promise(r => setTimeout(r, 150));
+                await page.mouse.up();
+            }
+        }
+    } catch (e) { }
+
+    try {
+        await page.waitForSelector('#username', { timeout: 60000 });
+        await page.type('#username', username);
+        await page.type('#password', password);
+
+        await Promise.all([
+            page.click('#login'),
+            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 })
+        ]);
+
+        const newCookies = await page.cookies();
+        fs.writeFileSync(COOKIE_PATH, JSON.stringify(newCookies, null, 2));
+        console.log('[RipperStore] Logged in successfully and saved cookies.');
+    } catch (e) {
+        console.error('[RipperStore] Login failed:', e);
+        const errPath = path.join(process.env.DATA_DIR || process.cwd(), 'ripper_login_error.png');
+        await page.screenshot({ path: errPath });
+        console.error(`[RipperStore] Saved error screenshot to ${errPath}`);
+    }
+}
+
 export async function searchRipperStore(query: string): Promise<SearchResult[]> {
     let browser;
     try {
@@ -57,6 +132,8 @@ export async function searchRipperStore(query: string): Promise<SearchResult[]> 
         });
 
         const page = await browser.newPage();
+
+        await loginToRipperStore(page);
 
         const url = API_URL.replace('{query}', encodeURIComponent(query));
         console.log(`[RipperStore] Searching for: ${query}`);
@@ -128,6 +205,8 @@ export async function extractPayLinkFromTopic(topicUrl: string): Promise<{ payLi
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         const page = await browser.newPage();
+
+        await loginToRipperStore(page);
 
         const topicData = await getJsonFromPage(page, topicApiUrl);
         let title = null;

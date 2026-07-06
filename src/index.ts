@@ -24,7 +24,7 @@ const client = new Client({
 
 const commandData = commands.map(c => c.data.toJSON());
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`Bot logged in as ${client.user?.tag}`);
 
     try {
