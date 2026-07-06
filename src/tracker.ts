@@ -140,8 +140,8 @@ async function notifyDiscord(client: Client, channelId: string, target: string, 
 
         const isUnknownCreator = !result.creator || result.creator === 'Unknown';
         const isGiftOrFound = result.title.toUpperCase().includes('GIFT') || result.title.toUpperCase().includes('[FOUND]');
-        const hasDownloadLinks = result.downloadLinks && result.downloadLinks.length > 0;
-        const isDefinitiveFind = (!isUnknownCreator || isGiftOrFound) && hasDownloadLinks;
+        const hasDownloadLinks = Boolean(result.downloadLinks && result.downloadLinks.length > 0);
+        const isDefinitiveFind = Boolean((!isUnknownCreator || isGiftOrFound) && hasDownloadLinks);
 
         const embedColor = isDefinitiveFind ? '#00FF00' : '#FFFF00';
         const embedTitle = isDefinitiveFind ? 'Avatar Found!' : 'Possible Avatar Found';
