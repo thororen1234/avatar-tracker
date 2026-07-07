@@ -95,6 +95,8 @@ export async function runTracker(client: Client, channelId: string) {
                 const isUnknownCreator = !result.creator || result.creator === 'Unknown';
 
                 const hasDownloadLinks = result.downloadLinks && result.downloadLinks.length > 0;
+                if (!hasDownloadLinks) continue;
+
                 const isDefinitive = (!isUnknownCreator || isGiftOrFound) && hasDownloadLinks;
 
                 if (targetFound && !isDefinitive) continue;
